@@ -2,11 +2,9 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
