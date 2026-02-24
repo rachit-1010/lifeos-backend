@@ -1,28 +1,22 @@
-# STAGE 1: Build
-FROM golang:1.23-alpine AS builder
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Download dependencies first (caching layers)
-COPY go.mod go.sum ./
-RUN go mod download
+# Install dependencies first (layer caching)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source and build
-COPY . .
-# CGO_ENABLED=0 creates a statically linked binary (no dependency on OS libs)
-RUN CGO_ENABLED=0 GOOS=linux go build -o lifeos-api .
+# Copy application code
+COPY app/ app/
 
-# STAGE 2: Run (Tiny Image)
-FROM gcr.io/distroless/static-debian12
+# Create non-root user
+RUN addgroup --system appgroup && \
+    adduser --system --ingroup appgroup appuser
+USER appuser
 
-WORKDIR /
-
-# Copy the binary from builder
-COPY --from=builder /app/lifeos-api /lifeos-api
-
-# Expose port (must match the port in main.go)
 EXPOSE 8080
 
-USER nonroot:nonroot
-
-CMD ["/lifeos-api"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
