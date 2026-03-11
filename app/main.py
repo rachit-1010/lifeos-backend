@@ -2,17 +2,22 @@ import logging
 from contextlib import asynccontextmanager
 
 from datetime import datetime
+import json
+import os
+from dotenv import load_dotenv
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query, Request,Depends, HTTPException, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from app.database import close_db, get_pool, init_db
-from app.models import Transaction, TransactionOut
+from app.models import Transaction, TransactionOut, OverlandPayload
 
 logger = logging.getLogger("uvicorn.error")
 
+load_dotenv()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -87,3 +92,89 @@ async def get_transactions(
         rows = await conn.fetch(sql, start, end, limit)
 
     return [dict(row) for row in rows]
+
+
+# Initialize the HTTP Bearer security scheme
+security = HTTPBearer()
+
+def verify_bearer_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    # Read the expected token from your .env file
+    expected_token = os.getenv("OVERLAND_TOKEN")
+    
+    # Safety check: ensure the server actually has a token configured
+    if not expected_token:
+        logger.error("OVERLAND_TOKEN environment variable is not set.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail="Server configuration error"
+        )
+        
+    # Check if the token sent by Overland matches your .env token
+    if credentials.credentials != expected_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+        
+    return credentials.credentials
+
+
+@app.post("/location", status_code=200)
+async def create_locations(
+    payload: OverlandPayload,
+    token: str = Depends(verify_bearer_token)
+):
+    pool = get_pool()
+    count = 0
+
+    # ST_MakePoint takes (longitude, latitude)
+    # The ::jsonb cast ensures the raw dictionary is stored correctly
+    sql = """
+        INSERT INTO location_logs (
+            timestamp, geom, latitude, longitude, altitude,
+            horizontal_accuracy, battery_level, battery_state,
+            wifi_ssid, motion_state, device_id, raw_payload
+        )
+        VALUES (
+            $1, ST_SetSRID(ST_MakePoint($2, $3), 4326), $3, $2, $4,
+            $5, $6, $7, $8, $9, $10, $11::jsonb
+        )
+    """
+
+    async with pool.acquire() as conn:
+        for loc in payload.locations:
+            props = loc.properties
+            
+            # Overland GeoJSON coordinates are [longitude, latitude]
+            lon = loc.geometry.coordinates[0]
+            lat = loc.geometry.coordinates[1]
+
+            # Convert motion list ['driving', 'stationary'] to a comma-separated string
+            motion_str = ",".join(props.motion) if props.motion else None
+
+            # Serialize the specific location feature back to JSON string for the raw_payload column
+            raw_json = json.dumps(loc.model_dump(mode="json"))
+
+            try:
+                await conn.execute(
+                    sql,
+                    props.timestamp,
+                    lon,                      # $2
+                    lat,                      # $3
+                    props.altitude,           # $4
+                    props.horizontal_accuracy,# $5
+                    props.battery_level,      # $6
+                    props.battery_state,      # $7
+                    props.wifi,               # $8
+                    motion_str,               # $9
+                    props.device_id,          # $10
+                    raw_json                  # $11
+                )
+                count += 1
+            except Exception as e:
+                logger.error(f"Error inserting location: {e}")
+                continue
+
+    # Overland specifically expects a JSON response with "result": "ok" to mark the batch as successfully sent
+    return JSONResponse(content={"result": "ok"})
