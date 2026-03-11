@@ -140,6 +140,18 @@ async def create_locations(
             $1, ST_SetSRID(ST_MakePoint($2, $3), 4326), $3, $2, $4,
             $5, $6, $7, $8, $9, $10, $11::jsonb
         )
+        ON CONFLICT (timestamp) 
+        DO UPDATE SET 
+            geom = EXCLUDED.geom,
+            latitude = EXCLUDED.latitude,
+            longitude = EXCLUDED.longitude,
+            altitude = EXCLUDED.altitude,
+            horizontal_accuracy = EXCLUDED.horizontal_accuracy,
+            battery_level = EXCLUDED.battery_level,
+            battery_state = EXCLUDED.battery_state,
+            wifi_ssid = EXCLUDED.wifi_ssid,
+            motion_state = EXCLUDED.motion_state,
+            raw_payload = EXCLUDED.raw_payload;
     """
 
     async with pool.acquire() as conn:
